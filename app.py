@@ -78,6 +78,7 @@ def load_active_criteria(conn):
         WHERE is_active = 1
         ORDER BY criterion_id
     """).fetchall()
+
     criteria = [
         {
             "criterion_id": r[0],
@@ -89,11 +90,16 @@ def load_active_criteria(conn):
         }
         for r in rows
     ]
+
     if not criteria:
         raise ValueError("No active evaluation criteria.")
+
     total = sum(c["weight"] for c in criteria)
     if not math.isclose(total, 100.0):
-        raise ValueError(f"Active criterion weights must total 100%. Current total: {total:.2f}%")
+        raise ValueError(
+            f"Active criterion weights must total 100%. Current total: {total:.2f}%"
+        )
+
     return criteria
 
 
@@ -175,13 +181,22 @@ def evaluation_json_schema():
 
 
 def call_llm(supplier_name, proposal_text, criteria):
-    api_key = st.secrets["OPENROUTER_API_KEY"]
+    api_key = st.session_state.get("OPENROUTER_API_KEY")
+    model_name = st.session_state.get("MODEL_NAME")
+
+    if not api_key:
+        raise ValueError("OPENROUTER_API_KEY has not been entered.")
+
+    if not model_name:
+        raise ValueError("MODEL_NAME has not been entered.")
+
     client = OpenAI(
         base_url="https://openrouter.ai/api/v1",
         api_key=api_key,
     )
+
     response = client.chat.completions.create(
-        model=MODEL_NAME,
+        model=model_name,
         messages=[{
             "role": "user",
             "content": build_evaluation_prompt(supplier_name, proposal_text, criteria),
@@ -196,11 +211,13 @@ def call_llm(supplier_name, proposal_text, criteria):
             },
         },
     )
+
     content = response.choices[0].message.content
     if not content:
         raise ValueError(
             f"LLM returned empty content. Finish reason: {response.choices[0].finish_reason}"
         )
+
     return json.loads(content)
 
 
@@ -264,6 +281,7 @@ def calculate_absolute_score(evaluation, criteria):
     by_id = {c["criterion_id"]: c for c in criteria}
     total = 0.0
     details = []
+
     for item in evaluation["criteria"]:
         c = by_id[item["criterion_id"]]
         contribution = (item["score"] / item["max_score"]) * c["weight"]
@@ -278,11 +296,13 @@ def calculate_absolute_score(evaluation, criteria):
             "evidence": item["evidence"],
             "justification": item["justification"],
         })
+
     return total, details
 
 
 def add_peer_metrics(supplier_scores, criteria):
     benchmarks = {}
+
     for c in criteria:
         cid = c["criterion_id"]
         benchmarks[cid] = max(
@@ -298,17 +318,19 @@ def add_peer_metrics(supplier_scores, criteria):
             benchmark = benchmarks[item["criterion_id"]]
             item["benchmark"] = benchmark
             item["gap"] = item["score"] - benchmark
-            relative = (
-                100.0 if item["score"] == 0 else 0.0
-                if benchmark == 0
-                else (item["score"] / benchmark) * 100.0
-            )
+
+            if benchmark == 0:
+                relative = 100.0 if item["score"] == 0 else 0.0
+            else:
+                relative = (item["score"] / benchmark) * 100.0
+
             item["relative_performance_pct"] = relative
             weight = next(
                 c["weight"] for c in criteria
                 if c["criterion_id"] == item["criterion_id"]
             )
             ppi += relative * weight / 100.0
+
         supplier["ppi"] = ppi
 
     return supplier_scores, benchmarks
@@ -324,8 +346,10 @@ def rank_suppliers(supplier_scores):
             x["supplier_name"].lower(),
         ),
     )
+
     for rank, supplier in enumerate(ranked, 1):
         supplier["final_rank"] = rank
+
     return ranked
 
 
@@ -337,6 +361,7 @@ def persist_run(conn, run_id, created_at, criteria, ranked_suppliers):
         "INSERT INTO rfp_runs (rfp_run_id, created_at, status) VALUES (?, ?, ?)",
         (run_id, created_at, "completed"),
     )
+
     for supplier in ranked_suppliers:
         result_json = json.dumps(supplier, ensure_ascii=False)
         conn.execute(
@@ -355,6 +380,7 @@ def persist_run(conn, run_id, created_at, criteria, ranked_suppliers):
                 result_json,
             ),
         )
+
     conn.commit()
 
 
@@ -374,7 +400,7 @@ def build_final_result(run_id, created_at, criteria, benchmarks, ranked_supplier
 st.set_page_config(
     page_title="Agentic RFP Evaluation",
     page_icon="📊",
-    layout="wide"
+    layout="wide",
 )
 
 st.title("Agentic RFP Evaluation & Supplier Ranking")
@@ -391,13 +417,13 @@ st.sidebar.header("LLM Configuration")
 openrouter_api_key = st.sidebar.text_input(
     "OPENROUTER_API_KEY",
     type="password",
-    help="Enter your OpenRouter API key. It is used only for the current session."
+    help="Enter your OpenRouter API key. It is used only for the current session.",
 )
 
 model_name = st.sidebar.text_input(
     "MODEL_NAME",
     value="openai/gpt-oss-120b",
-    help="OpenRouter model identifier."
+    help="OpenRouter model identifier.",
 )
 
 st.session_state["OPENROUTER_API_KEY"] = openrouter_api_key
@@ -419,11 +445,13 @@ with tab1:
     st.subheader("Active evaluation criteria")
     criteria = load_active_criteria(conn)
     criteria_df = pd.DataFrame(criteria)
+
     st.dataframe(
         criteria_df[["criterion_id", "name", "description", "weight", "max_score"]],
         use_container_width=True,
         hide_index=True,
     )
+
     st.info("Criteria and weights are loaded from SQLite. Active weights must total 100%.")
 
 with tab2:
@@ -437,17 +465,45 @@ with tab2:
     )
 
     metadata = {}
+
     if uploads:
-        st.caption("Supplier name is taken from the PDF filename by default; you can edit it below.")
+        st.caption(
+            "Supplier name is taken from the PDF filename by default; you can edit it below."
+        )
+
         for idx, uploaded in enumerate(uploads):
-            default_name = Path(uploaded.name).stem.replace("_", " ").replace("-", " ").title()
+            default_name = (
+                Path(uploaded.name).stem
+                .replace("_", " ")
+                .replace("-", " ")
+                .title()
+            )
+
             c1, c2, c3 = st.columns([2, 1, 1])
+
             with c1:
-                name = st.text_input("Supplier name", value=default_name, key=f"name_{idx}")
+                name = st.text_input(
+                    "Supplier name",
+                    value=default_name,
+                    key=f"name_{idx}",
+                )
+
             with c2:
-                date = st.date_input("Submission date", key=f"date_{idx}")
+                date = st.date_input(
+                    "Submission date",
+                    key=f"date_{idx}",
+                )
+
             with c3:
-                exp = st.number_input("Experience rating", min_value=0.0, max_value=10.0, value=5.0, step=1.0, key=f"exp_{idx}")
+                exp = st.number_input(
+                    "Experience rating",
+                    min_value=0.0,
+                    max_value=10.0,
+                    value=5.0,
+                    step=1.0,
+                    key=f"exp_{idx}",
+                )
+
             metadata[uploaded.name] = {
                 "supplier_name": name,
                 "submission_date": date.isoformat(),
@@ -455,8 +511,10 @@ with tab2:
             }
 
     if st.button("Evaluate suppliers", type="primary", disabled=not uploads):
-        if "OPENROUTER_API_KEY" not in st.secrets:
-            st.error("OPENROUTER_API_KEY is not configured in Streamlit Secrets.")
+        if not openrouter_api_key or not model_name:
+            st.error(
+                "Enter OPENROUTER_API_KEY and MODEL_NAME in the LLM Configuration panel before evaluating suppliers."
+            )
             st.stop()
 
         criteria = load_active_criteria(conn)
@@ -465,8 +523,10 @@ with tab2:
         errors = []
 
         progress = st.progress(0.0)
+
         for idx, uploaded in enumerate(uploads):
             meta = metadata[uploaded.name]
+
             try:
                 proposal_text = extract_pdf_text(uploaded.getvalue())
                 raw = call_llm(meta["supplier_name"], proposal_text, criteria)
@@ -476,6 +536,7 @@ with tab2:
                     raise ValueError("; ".join(warnings))
 
                 score, details = calculate_absolute_score(validated, criteria)
+
                 supplier_scores.append({
                     "supplier_name": meta["supplier_name"],
                     "submission_date": meta["submission_date"],
@@ -486,7 +547,9 @@ with tab2:
                     "risks": validated["risks"],
                     "overall_summary": validated["overall_summary"],
                 })
+
                 all_warnings[meta["supplier_name"]] = warnings
+
             except Exception as e:
                 errors.append(f"{meta['supplier_name']}: {e}")
 
@@ -495,27 +558,63 @@ with tab2:
         if errors:
             for error in errors:
                 st.error(error)
+
         elif not supplier_scores:
             st.error("No supplier evaluations were completed.")
+
         else:
-            supplier_scores, benchmarks = add_peer_metrics(supplier_scores, criteria)
+            supplier_scores, benchmarks = add_peer_metrics(
+                supplier_scores,
+                criteria,
+            )
+
             ranked = rank_suppliers(supplier_scores)
 
             run_id = "RFP-PROTOTYPE-" + datetime.now().strftime("%Y%m%d-%H%M%S")
             created_at = datetime.now().isoformat()
-            final_result = build_final_result(run_id, created_at, criteria, benchmarks, ranked)
+
+            final_result = build_final_result(
+                run_id,
+                created_at,
+                criteria,
+                benchmarks,
+                ranked,
+            )
 
             try:
-                persist_run(conn, run_id, created_at, criteria, ranked)
+                persist_run(
+                    conn,
+                    run_id,
+                    created_at,
+                    criteria,
+                    ranked,
+                )
             except sqlite3.IntegrityError:
-                # Extremely unlikely timestamp collision; retry once with microseconds.
-                run_id = "RFP-PROTOTYPE-" + datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+                run_id = (
+                    "RFP-PROTOTYPE-"
+                    + datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+                )
                 created_at = datetime.now().isoformat()
-                final_result = build_final_result(run_id, created_at, criteria, benchmarks, ranked)
-                persist_run(conn, run_id, created_at, criteria, ranked)
+
+                final_result = build_final_result(
+                    run_id,
+                    created_at,
+                    criteria,
+                    benchmarks,
+                    ranked,
+                )
+
+                persist_run(
+                    conn,
+                    run_id,
+                    created_at,
+                    criteria,
+                    ranked,
+                )
 
             st.session_state["latest_result"] = final_result
             st.session_state["latest_run_id"] = run_id
+
             st.success(f"Evaluation complete. RFP_RUN_ID: {run_id}")
 
             if any(all_warnings.values()):
@@ -525,10 +624,13 @@ with tab2:
 
 with tab3:
     result = st.session_state.get("latest_result")
+
     if not result:
         st.info("Run an evaluation from Supplier Input to see results.")
+
     else:
         ranked = result["suppliers"]
+
         leaderboard = pd.DataFrame([
             {
                 "Rank": s["final_rank"],
@@ -540,12 +642,24 @@ with tab3:
             }
             for s in ranked
         ])
+
         st.subheader("Leaderboard")
-        st.dataframe(leaderboard, use_container_width=True, hide_index=True)
+        st.dataframe(
+            leaderboard,
+            use_container_width=True,
+            hide_index=True,
+        )
 
         st.subheader("Detailed scorecards")
-        selected = st.selectbox("Select supplier", [s["supplier_name"] for s in ranked])
-        supplier = next(s for s in ranked if s["supplier_name"] == selected)
+
+        selected = st.selectbox(
+            "Select supplier",
+            [s["supplier_name"] for s in ranked],
+        )
+
+        supplier = next(
+            s for s in ranked if s["supplier_name"] == selected
+        )
 
         c1, c2, c3 = st.columns(3)
         c1.metric("Rank", supplier["final_rank"])
@@ -553,6 +667,7 @@ with tab3:
         c3.metric("PPI", f"{supplier['ppi']:.2f}%")
 
         score_rows = []
+
         for item in supplier["criteria"]:
             score_rows.append({
                 "Criterion": item["name"],
@@ -563,12 +678,18 @@ with tab3:
                 "Relative %": round(item["relative_performance_pct"], 2),
                 "Weighted Contribution": round(item["weighted_contribution"], 2),
             })
-        st.dataframe(pd.DataFrame(score_rows), use_container_width=True, hide_index=True)
+
+        st.dataframe(
+            pd.DataFrame(score_rows),
+            use_container_width=True,
+            hide_index=True,
+        )
 
         for item in supplier["criteria"]:
             with st.expander(item["name"]):
                 st.markdown("**Evidence**")
                 st.write(item["evidence"])
+
                 st.markdown("**Justification**")
                 st.write(item["justification"])
 
@@ -582,14 +703,24 @@ with tab3:
 
 with tab4:
     result = st.session_state.get("latest_result")
+
     if not result:
         st.info("Run an evaluation to see run details.")
+
     else:
         st.write("**RFP_RUN_ID:**", result["rfp_run_id"])
         st.write("**Created at:**", result["created_at"])
-        st.write("**Tie-break order:** Higher PPI → earlier submission date → higher historical experience rating → supplier name ascending.")
+        st.write(
+            "**Tie-break order:** Higher PPI → earlier submission date → "
+            "higher historical experience rating → supplier name ascending."
+        )
 
-        json_bytes = json.dumps(result, indent=2, ensure_ascii=False).encode("utf-8")
+        json_bytes = json.dumps(
+            result,
+            indent=2,
+            ensure_ascii=False,
+        ).encode("utf-8")
+
         st.download_button(
             "Download complete result as JSON",
             data=json_bytes,
