@@ -12,7 +12,6 @@ from pydantic import BaseModel, ValidationError
 
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "rfp_prototype.db"
-MODEL_NAME = "openai/gpt-oss-120b"
 
 
 # -----------------------------
@@ -372,9 +371,42 @@ def build_final_result(run_id, created_at, criteria, benchmarks, ranked_supplier
 # -----------------------------
 # Streamlit UI
 # -----------------------------
-st.set_page_config(page_title="Agentic RFP Evaluation", page_icon="📊", layout="wide")
+st.set_page_config(
+    page_title="Agentic RFP Evaluation",
+    page_icon="📊",
+    layout="wide"
+)
+
 st.title("Agentic RFP Evaluation & Supplier Ranking")
-st.caption("LLM-assisted proposal evaluation with deterministic scoring, peer benchmarking, PPI, ranking, and SQLite persistence.")
+st.caption(
+    "LLM-assisted proposal evaluation with deterministic scoring, "
+    "peer benchmarking, PPI, ranking, and SQLite persistence."
+)
+
+# -------------------------------------------------
+# Runtime LLM Configuration
+# -------------------------------------------------
+st.sidebar.header("LLM Configuration")
+
+openrouter_api_key = st.sidebar.text_input(
+    "OPENROUTER_API_KEY",
+    type="password",
+    help="Enter your OpenRouter API key. It is used only for the current session."
+)
+
+model_name = st.sidebar.text_input(
+    "MODEL_NAME",
+    value="openai/gpt-oss-120b",
+    help="OpenRouter model identifier."
+)
+
+st.session_state["OPENROUTER_API_KEY"] = openrouter_api_key
+st.session_state["MODEL_NAME"] = model_name
+
+if openrouter_api_key and model_name:
+    st.sidebar.success("LLM configuration ready.")
+else:
+    st.sidebar.warning("Enter both API key and model name before evaluation.")
 
 conn = get_conn()
 seed_criteria(conn)
